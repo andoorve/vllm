@@ -32,6 +32,7 @@ from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
 from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
+
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
@@ -647,7 +648,8 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[int], LoRAMapping, torch.Tensor]:
-        if get_tensor_model_parallel_src_rank() == torch.distributed.get_rank():
+        if get_tensor_model_parallel_src_rank() == torch.distributed.get_rank(
+        ):
             prefill_reqs = []
             decode_reqs = []
             for seq_group_meta in seq_group_metadata_list:
@@ -745,7 +747,9 @@ class ModelRunner:
                 metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
             else:
                 metadata_dict.update(decode_attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=get_tensor_model_parallel_src_rank(), group=get_tensor_model_parallel_group())
+            broadcast_tensor_dict(metadata_dict,
+                                  src=get_tensor_model_parallel_src_rank(),
+                                  group=get_tensor_model_parallel_group())
 
             # Broadcast decode attn metadata for mixed batch type.
             # The additional broadcast costs 300us overhead on 4 A10 GPUs.
@@ -753,9 +757,13 @@ class ModelRunner:
             if batch_type == BatchType.MIXED:
                 assert decode_attn_metadata is not None
                 metadata_dict = decode_attn_metadata.asdict_zerocopy()
-                broadcast_tensor_dict(metadata_dict, src=get_tensor_model_parallel_src_rank(), group=get_tensor_model_parallel_group())
+                broadcast_tensor_dict(metadata_dict,
+                                      src=get_tensor_model_parallel_src_rank(),
+                                      group=get_tensor_model_parallel_group())
         else:
-            metadata_dict = broadcast_tensor_dict(src=get_tensor_model_parallel_src_rank(), group=get_tensor_model_parallel_group())
+            metadata_dict = broadcast_tensor_dict(
+                src=get_tensor_model_parallel_src_rank(),
+                group=get_tensor_model_parallel_group())
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
             slot_mapping = metadata_dict.pop("slot_mapping")
@@ -791,7 +799,9 @@ class ModelRunner:
             # if it is a mixed batch, decode attn_metadata is broadcasted
             # separately.
             if batch_type == BatchType.MIXED:
-                metadata_dict = broadcast_tensor_dict(src=get_tensor_model_parallel_src_rank(), group=get_tensor_model_parallel_group())
+                metadata_dict = broadcast_tensor_dict(
+                    src=get_tensor_model_parallel_src_rank(),
+                    group=get_tensor_model_parallel_group())
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
 
@@ -816,8 +826,8 @@ class ModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-        lora_requests, lora_mapping, multi_modal_input
-        ) = self.prepare_input_tensors(seq_group_metadata_list)
+         lora_requests, lora_mapping, multi_modal_input
+         ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -844,7 +854,8 @@ class ModelRunner:
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         # Only perform sampling in the last pipeline stage of the driver worker.
-        if not sampling_metadata.perform_sampling or not is_pipeline_model_parallel_last_rank():
+        if not sampling_metadata.perform_sampling or not is_pipeline_model_parallel_last_rank(
+        ):
             return None
 
         # Sample the next token.

@@ -181,13 +181,15 @@ class GPT2Model(nn.Module):
         assert not config.add_cross_attention
         assert not config.scale_attn_by_inverse_layer_idx
         assert not config.reorder_and_upcast_attn
-        assert config.num_hidden_layers % get_pipeline_model_parallel_world_size() == 0
+        assert config.num_hidden_layers % get_pipeline_model_parallel_world_size(
+        ) == 0
         self.embed_dim = config.hidden_size
         self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList([
             GPT2Block(config, linear_method)
-            for _ in range(config.num_hidden_layers // get_pipeline_model_parallel_world_size())
+            for _ in range(config.num_hidden_layers //
+                           get_pipeline_model_parallel_world_size())
         ])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
@@ -203,10 +205,13 @@ class GPT2Model(nn.Module):
             position_embeds = self.wpe(position_ids)
             hidden_states = inputs_embeds + position_embeds
         else:
-            hidden_states = torch.empty(list(input_ids.shape) + [self.embed_dim],
+            hidden_states = torch.empty(list(input_ids.shape) +
+                                        [self.embed_dim],
                                         dtype=self.wte.weight.dtype,
                                         device=self.wte.weight.device)
-            torch.distributed.recv(hidden_states, get_pipeline_model_parallel_prev_rank(), get_pipeline_model_parallel_group())
+            torch.distributed.recv(hidden_states,
+                                   get_pipeline_model_parallel_prev_rank(),
+                                   get_pipeline_model_parallel_group())
 
         for i in range(len(self.h)):
             layer = self.h[i]
@@ -215,7 +220,9 @@ class GPT2Model(nn.Module):
         if is_pipeline_model_parallel_last_rank():
             hidden_states = self.ln_f(hidden_states)
         else:
-            torch.distributed.send(hidden_states, get_pipeline_model_parallel_next_rank(), get_pipeline_model_parallel_group())
+            torch.distributed.send(hidden_states,
+                                   get_pipeline_model_parallel_next_rank(),
+                                   get_pipeline_model_parallel_group())
         return hidden_states
 
 
@@ -266,10 +273,10 @@ class GPT2LMHeadModel(nn.Module):
                      revision: Optional[str] = None):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         pattern = r"(transformer\.h\.)(\d+)(\..*)"
-        local_replace = lambda match: replace_pp_layer_name(match,
-                                                            self.config.num_hidden_layers,
-                                                            get_pipeline_model_parallel_world_size(),
-                                                            get_pipeline_model_parallel_rank())
+        local_replace = lambda match: replace_pp_layer_name(
+            match, self.config.num_hidden_layers,
+            get_pipeline_model_parallel_world_size(),
+            get_pipeline_model_parallel_rank())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "lm_head.weight" in name:

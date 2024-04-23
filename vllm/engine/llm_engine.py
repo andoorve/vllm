@@ -183,11 +183,18 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = [Scheduler(scheduler_config, cache_config, parallel_config, lora_config)
-                          for _ in range(parallel_config.pipeline_parallel_size)]
+        self.scheduler = [
+            Scheduler(scheduler_config, cache_config, parallel_config,
+                      lora_config)
+            for _ in range(parallel_config.pipeline_parallel_size)
+        ]
         self.running_virtual_engine = 0
-        self.pipeline_queue = Queue(maxsize=parallel_config.pipeline_parallel_size)
-        self.virtual_engine_locks = [asyncio.Lock() for _ in range(parallel_config.pipeline_parallel_size)]
+        self.pipeline_queue = Queue(
+            maxsize=parallel_config.pipeline_parallel_size)
+        self.virtual_engine_locks = [
+            asyncio.Lock()
+            for _ in range(parallel_config.pipeline_parallel_size)
+        ]
 
         # Metric Logging.
         if self.log_stats:
@@ -421,11 +428,13 @@ class LLMEngine:
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
-        return sum(scheduler.get_num_unfinished_seq_groups() for scheduler in self.scheduler)
+        return sum(scheduler.get_num_unfinished_seq_groups()
+                   for scheduler in self.scheduler)
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        return any(scheduler.has_unfinished_seqs() for scheduler in self.scheduler)
+        return any(scheduler.has_unfinished_seqs()
+                   for scheduler in self.scheduler)
 
     def _check_beam_search_early_stopping(
         self,
@@ -763,19 +772,25 @@ class LLMEngine:
 
         # KV Cache Usage in %.
         num_total_gpu = self.cache_config.num_gpu_blocks
-        num_free_gpu = sum(scheduler.block_manager.get_num_free_gpu_blocks() for scheduler in self.scheduler)
+        num_free_gpu = sum(scheduler.block_manager.get_num_free_gpu_blocks()
+                           for scheduler in self.scheduler)
         gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage = 0.
         if num_total_cpu > 0:
-            num_free_cpu = sum(scheduler.block_manager.get_num_free_cpu_blocks() for scheduler in self.scheduler)
+            num_free_cpu = sum(
+                scheduler.block_manager.get_num_free_cpu_blocks()
+                for scheduler in self.scheduler)
             cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Scheduler State
-        num_running = sum(len(scheduler.running) for scheduler in self.scheduler)
-        num_swapped = sum(len(scheduler.swapped) for scheduler in self.scheduler)
-        num_waiting = sum(len(scheduler.waiting) for scheduler in self.scheduler)
+        num_running = sum(
+            len(scheduler.running) for scheduler in self.scheduler)
+        num_swapped = sum(
+            len(scheduler.swapped) for scheduler in self.scheduler)
+        num_waiting = sum(
+            len(scheduler.waiting) for scheduler in self.scheduler)
 
         # Iteration stats if we have scheduler output.
         num_prompt_tokens = 0

@@ -25,6 +25,7 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
 
+
 class Worker(WorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
 
@@ -173,9 +174,15 @@ class Worker(WorkerBase):
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = [CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config) for _ in range(self.parallel_config.pipeline_parallel_size)]
-        self.gpu_cache = [self.cache_engine[ve].gpu_cache for ve in range(self.parallel_config.pipeline_parallel_size)]
+        self.cache_engine = [
+            CacheEngine(self.cache_config, self.model_config,
+                        self.parallel_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.gpu_cache = [
+            self.cache_engine[ve].gpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
         self.model_runner.set_block_size(self.cache_engine[0].block_size)
 
     def _warm_up_model(self) -> None:
@@ -224,24 +231,28 @@ class Worker(WorkerBase):
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
             }
-            broadcast_tensor_dict(data, src=get_tensor_model_parallel_src_rank(), group=get_tensor_model_parallel_group())
+            broadcast_tensor_dict(data,
+                                  src=get_tensor_model_parallel_src_rank(),
+                                  group=get_tensor_model_parallel_group())
         else:
-            data = broadcast_tensor_dict(src=get_tensor_model_parallel_src_rank(),
-                                         group=get_tensor_model_parallel_group())
+            data = broadcast_tensor_dict(
+                src=get_tensor_model_parallel_src_rank(),
+                group=get_tensor_model_parallel_group())
             num_seq_groups = data["num_seq_groups"]
             virtual_engine = data["virtual_engine"]
             blocks_to_swap_in = data["blocks_to_swap_in"]
             blocks_to_swap_out = data["blocks_to_swap_out"]
             blocks_to_copy = data["blocks_to_copy"]
 
-        self.cache_swap(virtual_engine, blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        self.cache_swap(virtual_engine, blocks_to_swap_in, blocks_to_swap_out,
+                        blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return {}
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache[virtual_engine])
+        output = self.model_runner.execute_model(
+            seq_group_metadata_list, self.gpu_cache[virtual_engine])
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

@@ -29,16 +29,14 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              get_tensor_model_parallel_rank,
-                              get_pipeline_model_parallel_world_size,
-                              is_pipeline_model_parallel_first_rank,
-                              is_pipeline_model_parallel_last_rank,
-                              get_pipeline_model_parallel_rank,
-                              get_pipeline_model_parallel_prev_rank,
-                              get_pipeline_model_parallel_next_rank,
-                              get_pipeline_model_parallel_group,
-                              send_object_list, recv_object_list)
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank,
+    get_pipeline_model_parallel_world_size,
+    is_pipeline_model_parallel_first_rank,
+    is_pipeline_model_parallel_last_rank, get_pipeline_model_parallel_rank,
+    get_pipeline_model_parallel_prev_rank,
+    get_pipeline_model_parallel_next_rank, get_pipeline_model_parallel_group,
+    send_object_list, recv_object_list)
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -270,10 +268,12 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        assert config.num_hidden_layers % get_pipeline_model_parallel_world_size() == 0
+        assert config.num_hidden_layers % get_pipeline_model_parallel_world_size(
+        ) == 0
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config, linear_method)
-            for _ in range(config.num_hidden_layers // get_pipeline_model_parallel_world_size())
+            for _ in range(config.num_hidden_layers //
+                           get_pipeline_model_parallel_world_size())
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -295,13 +295,19 @@ class LlamaModel(nn.Module):
                 hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
-            hidden_states_residual_metadata = [None] * 4
-            recv_object_list(hidden_states_residual_metadata, get_pipeline_model_parallel_prev_rank(),
+            sizes = list(input_ids.shape) + [self.config.hidden_size]
+            hidden_states = torch.empty(sizes,
+                                        dtype=self.embed_tokens.weight.dtype,
+                                        device=self.embed_tokens.weight.device)
+            residual = torch.empty(sizes,
+                                   dtype=self.embed_tokens.weight.dtype,
+                                   device=self.embed_tokens.weight.device)
+            torch.distributed.recv(hidden_states,
+                                   get_pipeline_model_parallel_prev_rank(),
                                    get_pipeline_model_parallel_group())
-            hidden_states = torch.empty(hidden_states_residual_metadata[0], dtype=hidden_states_residual_metadata[1], device="cuda")
-            residual = torch.empty(hidden_states_residual_metadata[2], dtype=hidden_states_residual_metadata[3], device="cuda")
-            torch.distributed.recv(hidden_states, get_pipeline_model_parallel_prev_rank(), get_pipeline_model_parallel_group())
-            torch.distributed.recv(residual, get_pipeline_model_parallel_prev_rank(), get_pipeline_model_parallel_group())
+            torch.distributed.recv(residual,
+                                   get_pipeline_model_parallel_prev_rank(),
+                                   get_pipeline_model_parallel_group())
 
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -316,10 +322,17 @@ class LlamaModel(nn.Module):
         if is_pipeline_model_parallel_last_rank():
             hidden_states, _ = self.norm(hidden_states, residual)
         else:
-            send_object_list([hidden_states.shape, hidden_states.dtype, residual.shape, residual.dtype], get_pipeline_model_parallel_next_rank(),
+            send_object_list([
+                hidden_states.shape, hidden_states.dtype, residual.shape,
+                residual.dtype
+            ], get_pipeline_model_parallel_next_rank(),
+                             get_pipeline_model_parallel_group())
+            torch.distributed.send(hidden_states,
+                                   get_pipeline_model_parallel_next_rank(),
                                    get_pipeline_model_parallel_group())
-            torch.distributed.send(hidden_states, get_pipeline_model_parallel_next_rank(), get_pipeline_model_parallel_group())
-            torch.distributed.send(residual, get_pipeline_model_parallel_next_rank(), get_pipeline_model_parallel_group())
+            torch.distributed.send(residual,
+                                   get_pipeline_model_parallel_next_rank(),
+                                   get_pipeline_model_parallel_group())
         return hidden_states
 
 
@@ -419,10 +432,10 @@ class LlamaForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         pattern = r"(model\.layers\.)(\d+)(\..*)"
-        local_replace = lambda match: replace_pp_layer_name(match,
-                                                            self.config.num_hidden_layers,
-                                                            get_pipeline_model_parallel_world_size(),
-                                                            get_pipeline_model_parallel_rank())
+        local_replace = lambda match: replace_pp_layer_name(
+            match, self.config.num_hidden_layers,
+            get_pipeline_model_parallel_world_size(),
+            get_pipeline_model_parallel_rank())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
@@ -466,8 +479,10 @@ class LlamaForCausalLM(nn.Module):
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
+        pp_size = get_pipeline_model_parallel_world_size()
+        pp_rank = get_pipeline_model_parallel_rank()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path, tp_rank, tp_size,
+                quantization_param_path, pp_rank, pp_size, tp_rank, tp_size,
                 self.config.num_hidden_layers,
                 self.config.__class__.model_type):
             layer_self_attn = self.model.layers[layer_idx].self_attn

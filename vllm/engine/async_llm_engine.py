@@ -199,9 +199,12 @@ class _AsyncLLMEngine(LLMEngine):
 
     async def step_async(self) -> List[RequestOutput]:
         while not self.pipeline_queue.full():
-            task = asyncio.get_event_loop().create_task(self._step_async(self.running_virtual_engine))
+            task = asyncio.get_event_loop().create_task(
+                self._step_async(self.running_virtual_engine))
             self.pipeline_queue.put(task)
-            self.running_virtual_engine = (self.running_virtual_engine + 1) % self.parallel_config.pipeline_parallel_size
+            self.running_virtual_engine = (
+                self.running_virtual_engine +
+                1) % self.parallel_config.pipeline_parallel_size
 
         running = self.pipeline_queue.get()
         output, virtual_engine = await running
@@ -221,20 +224,21 @@ class _AsyncLLMEngine(LLMEngine):
         the sequences and returns the newly generated results.
         """
         await self.virtual_engine_locks[virtual_engine].acquire()
-        seq_group_metadata_list, scheduler_outputs = self.scheduler[virtual_engine].schedule()
+        seq_group_metadata_list, scheduler_outputs = self.scheduler[
+            virtual_engine].schedule()
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
             output = await self.model_executor.execute_model_async(
-                seq_group_metadata_list,
-                virtual_engine,
+                seq_group_metadata_list, virtual_engine,
                 scheduler_outputs.blocks_to_swap_in,
                 scheduler_outputs.blocks_to_swap_out,
                 scheduler_outputs.blocks_to_copy)
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs), virtual_engine
+        return self._process_model_outputs(output,
+                                           scheduler_outputs), virtual_engine
 
     async def encode_request_async(
         self,

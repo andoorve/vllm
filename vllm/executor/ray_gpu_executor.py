@@ -390,9 +390,12 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         # Run the ray workers asynchronously.
         for rank, worker in enumerate(self.workers, start=1):
             if not rank % self.parallel_config.tensor_parallel_size == 0:
-                coros.append(worker.execute_method.remote(method, *args, **kwargs))
+                coros.append(
+                    worker.execute_method.remote(method, *args, **kwargs))
             else:
-                coros.append(worker.execute_method.remote(method, *driver_args, **driver_kwargs))
+                coros.append(
+                    worker.execute_method.remote(method, *driver_args,
+                                                 **driver_kwargs))
 
         all_outputs = await asyncio.gather(*coros)
         return all_outputs
@@ -416,5 +419,5 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
             })
 
         # Only the driver worker returns the sampling results.
-        output = functools.reduce(lambda x, y: x or y, all_outputs) 
+        output = functools.reduce(lambda x, y: x or y, all_outputs)
         return output

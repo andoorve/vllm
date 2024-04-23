@@ -266,8 +266,10 @@ class Scheduler:
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
-            num_gpu_blocks=self.cache_config.num_gpu_blocks // self.parallel_config.pipeline_parallel_size,
-            num_cpu_blocks=self.cache_config.num_cpu_blocks // self.parallel_config.pipeline_parallel_size,
+            num_gpu_blocks=self.cache_config.num_gpu_blocks //
+            self.parallel_config.pipeline_parallel_size,
+            num_cpu_blocks=self.cache_config.num_cpu_blocks //
+            self.parallel_config.pipeline_parallel_size,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 

@@ -10,13 +10,11 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_src_rank,
-                              get_tensor_model_parallel_world_size,
-                              split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce,
-                              tensor_model_parallel_gather)
+from vllm.distributed import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_src_rank,
+    get_tensor_model_parallel_world_size, split_tensor_along_last_dim,
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce,
+    tensor_model_parallel_gather)
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -1042,7 +1040,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         logits = torch.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits, dst=get_tensor_model_parallel_src_rank())
+        logits = tensor_model_parallel_gather(
+            logits, dst=get_tensor_model_parallel_src_rank())
         if logits is None:
             return None
 

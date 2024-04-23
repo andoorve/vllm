@@ -389,7 +389,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
 
         # Run the ray workers asynchronously.
         for rank, worker in enumerate(self.workers, start=1):
-            if not rank % self.parallel_config.tensor_parallel_size == 0:
+            if rank % self.parallel_config.tensor_parallel_size != 0:
                 coros.append(
                     worker.execute_method.remote(method, *args, **kwargs))
             else:

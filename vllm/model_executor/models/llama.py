@@ -35,8 +35,7 @@ from vllm.distributed import (
     is_pipeline_model_parallel_first_rank,
     is_pipeline_model_parallel_last_rank, get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_prev_rank,
-    get_pipeline_model_parallel_next_rank, get_pipeline_model_parallel_group,
-    send_object_list, recv_object_list)
+    get_pipeline_model_parallel_next_rank, get_pipeline_model_parallel_group)
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm

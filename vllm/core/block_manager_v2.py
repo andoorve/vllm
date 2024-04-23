@@ -224,7 +224,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             seq_block_ids)
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
-        if not parent_seq.seq_id in self.block_tables:
+        if parent_seq.seq_id not in self.block_tables:
             # Parent sequence has been freed or never existed.
             return
         src_block_table = self.block_tables[parent_seq.seq_id]

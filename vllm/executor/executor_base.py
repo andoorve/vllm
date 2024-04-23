@@ -101,6 +101,7 @@ class ExecutorAsyncBase(ExecutorBase):
     async def execute_model_async(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],

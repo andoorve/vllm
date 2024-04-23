@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
+import torch.distributed
 
 from .parallel_state import (get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
@@ -209,3 +210,131 @@ def broadcast_tensor_dict(
         for async_handle in async_handles:
             async_handle.wait()
     return tensor_dict
+
+def send_recv_tensor_dict(
+    tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
+    src: int = 0,
+    dst: int = 1,
+    group: Optional[ProcessGroup] = None,
+) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+    """Broadcast the input tensor dictionary."""
+    group = group or torch.distributed.group.WORLD
+    ranks = torch.distributed.get_process_group_ranks(group)
+    assert src in ranks, f"Invalid src rank ({src})"
+
+    rank = torch.distributed.get_rank()
+    if rank == src:
+        metadata_list: List[Tuple[Any, Any]] = []
+        assert isinstance(
+            tensor_dict,
+            dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
+        for key, value in tensor_dict.items():
+            if isinstance(value, torch.Tensor):
+                assert value.is_cuda, (
+                    f"Tensor {key}: {value} is not on cuda. Currently we only "
+                    f"support broadcasting tensors on cuda.")
+                metadata_list.append(
+                    (key, TensorMetadata(value.dtype, value.size())))
+            else:
+                metadata_list.append((key, value))
+        send_object_list([metadata_list],
+                          dst=dst,
+                          group=group)
+        async_handles = []
+        for key, value in metadata_list:
+            if isinstance(value, TensorMetadata):
+                tensor = tensor_dict[key]
+                async_handles.append(
+                    torch.distributed.isend(tensor,
+                                            dst=dst,
+                                            group=group))
+#        for async_handle in async_handles:
+#            async_handle.wait()
+    if rank == dst:
+        recv_metadata_list = [None]
+        recv_object_list(recv_metadata_list,
+                         src=src,
+                         group=group)
+        assert recv_metadata_list[0] is not None
+        tensor_dict = {}
+        async_handles = []
+        for key, value in recv_metadata_list[0]:
+            if isinstance(value, TensorMetadata):
+                tensor = torch.empty(value.size,
+                                     dtype=value.dtype,
+                                     device="cuda")
+                async_handle = torch.distributed.irecv(tensor,
+                                                       src=src,
+                                                       group=group)
+                async_handles.append(async_handle)
+                tensor_dict[key] = tensor
+            else:
+                tensor_dict[key] = value
+        for async_handle in async_handles:
+            async_handle.wait()
+    
+    return tensor_dict
+
+# REMOVE AFTER PYTORCH PR IS MERGED
+
+def send_object_list(object_list, dst, group=None, device=None):
+    if torch.distributed.get_rank() == dst:
+        raise ValueError(
+            "Invalid destination rank: destination rank should not be the same as "
+            "the rank of the current process."
+        )
+    # Current device selection.
+    # To preserve backwards compatibility, ``device`` is default to ``None``
+    # in which case we run current logic of device selection, i.e.
+    # ``current_device`` is CUDA if backend is NCCL otherwise CPU device. In the
+    # case it is not ``None`` we move the size and object tensors to be
+    # sent to this device.
+    current_device = device or torch.distributed.distributed_c10d._get_pg_default_device(group)
+    # Serialize object_list elements to tensors on src rank.
+    tensor_list, size_list = zip(*[torch.distributed.distributed_c10d._object_to_tensor(obj, current_device) for obj in object_list])
+    object_sizes_tensor = torch.cat(size_list)
+
+    # Send object sizes
+    torch.distributed.isend(object_sizes_tensor, dst=dst, group=group)
+
+    # Concatenate and send serialized object tensors
+    # Note: torch.cat will do an extra memory copy to the current device, if the tensor_list
+    # has only one element, we can skip the copy.
+    if len(tensor_list) == 1:  # type: ignore[possibly-undefined]
+        object_tensor = tensor_list[0]
+    else:
+        object_tensor = torch.cat(tensor_list)
+
+    torch.distributed.isend(object_tensor, dst=dst, group=group)
+
+
+def recv_object_list(object_list, src=None, group=None, device=None):
+    # Current device selection.
+    # To preserve backwards compatibility, ``device`` is default to ``None``
+    # in which case we run current logic of device selection, i.e.
+    # ``current_device`` is CUDA if backend is NCCL otherwise CPU device. In the
+    # case it is not ``None`` we move the size and object tensors to be
+    # received to this device.
+    current_device = device or torch.distributed.distributed_c10d._get_pg_default_device(group)
+    object_sizes_tensor = torch.empty(len(object_list), dtype=torch.long, device=current_device)
+
+    # Receive object sizes
+    req1 = torch.distributed.irecv(object_sizes_tensor, src=src, group=group)
+    req1.wait()
+
+    # Tensor to receive serialized objects into.
+    object_tensor = torch.empty(  # type: ignore[call-overload]
+        torch.sum(object_sizes_tensor).item(),  # type: ignore[arg-type]
+        dtype=torch.uint8,
+        device=current_device
+    )
+
+    req2 = torch.distributed.irecv(object_tensor, src=src, group=group)
+    req2.wait()
+    # Deserialize objects using their stored sizes.
+    offset = 0
+    for i, obj_size in enumerate(object_sizes_tensor):
+        obj_view = object_tensor[offset : offset + obj_size]
+        obj_view = obj_view.type(torch.uint8)
+        offset += obj_size
+        object_list[i] = torch.distributed.distributed_c10d._tensor_to_object(obj_view, obj_size)

@@ -1,4 +1,6 @@
 import time
+from queue import Queue
+import asyncio
 from typing import Iterable, List, Optional, Tuple, Type, Union
 
 from transformers import PreTrainedTokenizer
@@ -95,6 +97,7 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
+            f"pipeline_parallel_size={parallel_config.pipeline_parallel_size}, "
             f"disable_custom_all_reduce="
             f"{parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
@@ -149,6 +152,8 @@ class LLMEngine:
                     str(model_config.dtype),
                     "tensor_parallel_size":
                     parallel_config.tensor_parallel_size,
+                    "pipeline_parallel_size":
+                    parallel_config.pipeline_parallel_size,
                     "block_size":
                     cache_config.block_size,
                     "gpu_memory_utilization":
@@ -178,7 +183,11 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        self.scheduler = [Scheduler(scheduler_config, cache_config, parallel_config, lora_config)
+                          for _ in range(parallel_config.pipeline_parallel_size)]
+        self.running_virtual_engine = 0
+        self.pipeline_queue = Queue(maxsize=parallel_config.pipeline_parallel_size)
+        self.virtual_engine_locks = [asyncio.Lock() for _ in range(parallel_config.pipeline_parallel_size)]
 
         # Metric Logging.
         if self.log_stats:
@@ -382,7 +391,9 @@ class LLMEngine:
                                   arrival_time, lora_request, multi_modal_data)
 
         # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+        costs = [scheduler.get_cost() for scheduler in self.scheduler]
+        min_cost_scheduler = self.scheduler[costs.index(min(costs))]
+        min_cost_scheduler.add_seq_group(seq_group)
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
@@ -401,7 +412,8 @@ class LLMEngine:
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
-        self.scheduler.abort_seq_group(request_id)
+        for scheduler in self.scheduler:
+            scheduler.abort_seq_group(request_id)
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
@@ -409,11 +421,11 @@ class LLMEngine:
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
-        return self.scheduler.get_num_unfinished_seq_groups()
+        return sum(scheduler.get_num_unfinished_seq_groups() for scheduler in self.scheduler)
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        return self.scheduler.has_unfinished_seqs()
+        return any(scheduler.has_unfinished_seqs() for scheduler in self.scheduler)
 
     def _check_beam_search_early_stopping(
         self,
@@ -492,7 +504,8 @@ class LLMEngine:
                 # not be used in the future iterations.
                 parent.status = SequenceStatus.FINISHED_ABORTED
                 seq_group.remove(parent.seq_id)
-                self.scheduler.free_seq(parent)
+                for scheduler in self.scheduler:
+                    scheduler.free_seq(parent)
                 continue
             # Fork the parent sequence if there are multiple child samples.
             for child_sample in child_samples[:-1]:
@@ -525,7 +538,8 @@ class LLMEngine:
                 if seq is not parent:
                     seq_group.add(seq)
                     if not seq.is_finished():
-                        self.scheduler.fork_seq(parent, seq)
+                        for scheduler in self.scheduler:
+                            scheduler.fork_seq(parent, seq)
 
             # Free the finished and selected parent sequences' memory in block
             # manager. Keep them in the sequence group as candidate output.
@@ -533,7 +547,8 @@ class LLMEngine:
             # old sequences.
             for seq, parent in child_seqs:
                 if seq is parent and seq.is_finished():
-                    self.scheduler.free_seq(seq)
+                    for scheduler in self.scheduler:
+                        scheduler.free_seq(seq)
             return
 
         # Beam search case
@@ -618,13 +633,15 @@ class LLMEngine:
             if seq is not parent:
                 seq_group.add(seq)
                 if not seq.is_finished():
-                    self.scheduler.fork_seq(parent, seq)
+                    for scheduler in self.scheduler:
+                        scheduler.fork_seq(parent, seq)
 
         # Free the finished and selected parent sequences' memory in block
         # manager. Keep them in the sequence group as candidate output.
         for seq, parent in selected_child_seqs:
             if seq is parent and seq.is_finished():
-                self.scheduler.free_seq(seq)
+                for scheduler in self.scheduler:
+                    scheduler.free_seq(seq)
 
         # Remove the unselected parent sequences from the sequence group and
         # free their memory in block manager.
@@ -633,7 +650,8 @@ class LLMEngine:
                 # Remove the parent sequence if it is not selected for next
                 # iteration
                 seq_group.remove(seq.seq_id)
-                self.scheduler.free_seq(seq)
+                for scheduler in self.scheduler:
+                    scheduler.free_seq(seq)
 
     def _process_model_outputs(
             self, output: SamplerOutput,
@@ -651,7 +669,8 @@ class LLMEngine:
                 self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
-        self.scheduler.free_finished_seq_groups()
+        for scheduler in self.scheduler:
+            scheduler.free_finished_seq_groups()
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
@@ -744,20 +763,19 @@ class LLMEngine:
 
         # KV Cache Usage in %.
         num_total_gpu = self.cache_config.num_gpu_blocks
-        num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
+        num_free_gpu = sum(scheduler.block_manager.get_num_free_gpu_blocks() for scheduler in self.scheduler)
         gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage = 0.
         if num_total_cpu > 0:
-            num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
-            )
+            num_free_cpu = sum(scheduler.block_manager.get_num_free_cpu_blocks() for scheduler in self.scheduler)
             cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Scheduler State
-        num_running = len(self.scheduler.running)
-        num_swapped = len(self.scheduler.swapped)
-        num_waiting = len(self.scheduler.waiting)
+        num_running = sum(len(scheduler.running) for scheduler in self.scheduler)
+        num_swapped = sum(len(scheduler.swapped) for scheduler in self.scheduler)
+        num_waiting = sum(len(scheduler.waiting) for scheduler in self.scheduler)
 
         # Iteration stats if we have scheduler output.
         num_prompt_tokens = 0

@@ -22,15 +22,24 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, List, Optional, Tuple
+import re
 
 import torch
 from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              get_tensor_model_parallel_rank,
+                              get_pipeline_model_parallel_world_size,
+                              is_pipeline_model_parallel_first_rank,
+                              is_pipeline_model_parallel_last_rank,
+                              get_pipeline_model_parallel_rank,
+                              get_pipeline_model_parallel_prev_rank,
+                              get_pipeline_model_parallel_next_rank,
+                              get_pipeline_model_parallel_group,
+                              send_object_list, recv_object_list)
 from vllm.config import LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
@@ -45,7 +54,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator,
-                                              kv_cache_scales_loader)
+                                              kv_cache_scales_loader,
+                                              replace_pp_layer_name)
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip
 
@@ -260,9 +270,10 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
+        assert config.num_hidden_layers % get_pipeline_model_parallel_world_size() == 0
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config, linear_method)
-            for _ in range(config.num_hidden_layers)
+            for _ in range(config.num_hidden_layers // get_pipeline_model_parallel_world_size())
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -277,11 +288,21 @@ class LlamaModel(nn.Module):
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
+        if is_pipeline_model_parallel_first_rank():
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
+            residual = None
         else:
-            hidden_states = self.get_input_embeddings(input_ids)
-        residual = None
+            hidden_states_residual_metadata = [None] * 4
+            recv_object_list(hidden_states_residual_metadata, get_pipeline_model_parallel_prev_rank(),
+                                   get_pipeline_model_parallel_group())
+            hidden_states = torch.empty(hidden_states_residual_metadata[0], dtype=hidden_states_residual_metadata[1], device="cuda")
+            residual = torch.empty(hidden_states_residual_metadata[2], dtype=hidden_states_residual_metadata[3], device="cuda")
+            torch.distributed.recv(hidden_states, get_pipeline_model_parallel_prev_rank(), get_pipeline_model_parallel_group())
+            torch.distributed.recv(residual, get_pipeline_model_parallel_prev_rank(), get_pipeline_model_parallel_group())
+
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -291,7 +312,14 @@ class LlamaModel(nn.Module):
                 attn_metadata,
                 residual,
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+
+        if is_pipeline_model_parallel_last_rank():
+            hidden_states, _ = self.norm(hidden_states, residual)
+        else:
+            send_object_list([hidden_states.shape, hidden_states.dtype, residual.shape, residual.dtype], get_pipeline_model_parallel_next_rank(),
+                                   get_pipeline_model_parallel_group())
+            torch.distributed.send(hidden_states, get_pipeline_model_parallel_next_rank(), get_pipeline_model_parallel_group())
+            torch.distributed.send(residual, get_pipeline_model_parallel_next_rank(), get_pipeline_model_parallel_group())
         return hidden_states
 
 
@@ -390,6 +418,11 @@ class LlamaForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        pattern = r"(model\.layers\.)(\d+)(\..*)"
+        local_replace = lambda match: replace_pp_layer_name(match,
+                                                            self.config.num_hidden_layers,
+                                                            get_pipeline_model_parallel_world_size(),
+                                                            get_pipeline_model_parallel_rank())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
@@ -406,18 +439,26 @@ class LlamaForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                try:
+                    name = re.sub(pattern, local_replace, name)
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                except KeyError:
+                    pass
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+                try:
+                    name = re.sub(pattern, local_replace, name)
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                except KeyError:
+                    pass
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

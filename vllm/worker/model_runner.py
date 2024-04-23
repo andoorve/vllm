@@ -5,6 +5,7 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import numpy as np
 import torch
+import torch.distributed
 import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
@@ -12,7 +13,18 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
 from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, TensorizerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
+from vllm.distributed import (broadcast_tensor_dict,
+                              send_object_list,
+                              recv_object_list,
+                              send_recv_tensor_dict,
+                              with_pynccl_for_all_reduce,
+                              get_tensor_model_parallel_group,
+                              get_pipeline_model_parallel_group,
+                              get_pipeline_model_parallel_prev_rank,
+                              get_pipeline_model_parallel_next_rank,
+                              is_pipeline_model_parallel_first_rank,
+                              is_pipeline_model_parallel_last_rank,
+                              is_tensor_model_parallel_first_rank)
 from vllm.distributed.device_communicators import (custom_all_reduce,
                                                    pynccl_utils)
 from vllm.logger import init_logger
@@ -27,7 +39,6 @@ from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
 from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
-
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
@@ -743,7 +754,7 @@ class ModelRunner:
                 metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
             else:
                 metadata_dict.update(decode_attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
+            broadcast_tensor_dict(metadata_dict, src=0, group=get_tensor_model_parallel_group())
 
             # Broadcast decode attn metadata for mixed batch type.
             # The additional broadcast costs 300us overhead on 4 A10 GPUs.
@@ -751,9 +762,9 @@ class ModelRunner:
             if batch_type == BatchType.MIXED:
                 assert decode_attn_metadata is not None
                 metadata_dict = decode_attn_metadata.asdict_zerocopy()
-                broadcast_tensor_dict(metadata_dict, src=0)
+                broadcast_tensor_dict(metadata_dict, src=0, group=get_tensor_model_parallel_group())
         else:
-            metadata_dict = broadcast_tensor_dict(src=0)
+            metadata_dict = broadcast_tensor_dict(src=0, group=get_tensor_model_parallel_group())
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
             slot_mapping = metadata_dict.pop("slot_mapping")
@@ -789,7 +800,7 @@ class ModelRunner:
             # if it is a mixed batch, decode attn_metadata is broadcasted
             # separately.
             if batch_type == BatchType.MIXED:
-                metadata_dict = broadcast_tensor_dict(src=0)
+                metadata_dict = broadcast_tensor_dict(src=0, group=get_tensor_model_parallel_group())
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
 
@@ -813,9 +824,76 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+        if is_pipeline_model_parallel_first_rank():
+            (input_tokens, input_positions, attn_metadata, sampling_metadata,
+            lora_requests, lora_mapping, multi_modal_input
+            ) = self.prepare_input_tensors(seq_group_metadata_list)
+
+        if not is_pipeline_model_parallel_first_rank():
+            object_list = [None] * 7
+            recv_object_list(object_list=object_list,
+                             src = get_pipeline_model_parallel_prev_rank(),
+                             group = get_pipeline_model_parallel_group()) 
+            (input_tokens, input_positions, attn_metadata, sampling_metadata,
+            lora_requests, lora_mapping, multi_modal_input
+            ) = object_list
+
+            def irecv_tensor(tensor: torch.Tensor) -> Optional[torch.Tensor]:
+                if tensor is None:
+                    return
+                recv_tensor = torch.empty_like(tensor, device=self.device)
+                req = torch.distributed.irecv(recv_tensor, src=get_pipeline_model_parallel_prev_rank(), group=get_pipeline_model_parallel_group())
+                req.wait()
+                return recv_tensor
+
+            for key, value in vars(sampling_metadata).items():
+                if isinstance(value, torch.Tensor):
+                    setattr(sampling_metadata, key, irecv_tensor(value))
+            sampling_metadata.categorized_sample_indices = send_recv_tensor_dict(dst=torch.distributed.get_rank(),
+                                                                                 src=get_pipeline_model_parallel_prev_rank(),
+                                                                                 group=get_pipeline_model_parallel_group(),)
+            for key, value in vars(attn_metadata).items():
+                if isinstance(value, torch.Tensor):
+                    setattr(attn_metadata, key, irecv_tensor(value))
+            if attn_metadata.prefill_metadata is not None:
+                for key, value in vars(attn_metadata.prefill_metadata).items():
+                    if isinstance(value, torch.Tensor):
+                        setattr(attn_metadata.prefill_metadata, key, irecv_tensor(value))
+            if attn_metadata.decode_metadata is not None:
+                for key, value in vars(attn_metadata.decode_metadata).items():
+                    if isinstance(value, torch.Tensor):
+                        setattr(attn_metadata.decode_metadata, key, irecv_tensor(value))
+
+        if not is_pipeline_model_parallel_last_rank():
+            object_list = [input_tokens, input_positions, attn_metadata,
+            sampling_metadata, lora_requests, lora_mapping, multi_modal_input]
+            send_object_list(object_list=object_list,
+                             dst=get_pipeline_model_parallel_next_rank(),
+                             group=get_pipeline_model_parallel_group())
+            
+            def isend_tensor(tensor: torch.Tensor) -> None:
+                if tensor is None:
+                    return
+                torch.distributed.isend(tensor, dst=get_pipeline_model_parallel_next_rank(), group=get_pipeline_model_parallel_group())
+            
+            for key, value in vars(sampling_metadata).items():
+                if isinstance(value, torch.Tensor):
+                    isend_tensor(value)
+            send_recv_tensor_dict(tensor_dict=sampling_metadata.categorized_sample_indices,
+                                  dst=get_pipeline_model_parallel_next_rank(),
+                                  src=torch.distributed.get_rank(),
+                                  group=get_pipeline_model_parallel_group())
+            for key, value in vars(attn_metadata).items():
+                if isinstance(value, torch.Tensor):
+                    isend_tensor(value)
+            if attn_metadata.prefill_metadata is not None:
+                for key, value in vars(attn_metadata.prefill_metadata).items():
+                    if isinstance(value, torch.Tensor):
+                        isend_tensor(value)
+            if attn_metadata.decode_metadata is not None:
+                for key, value in vars(attn_metadata.decode_metadata).items():
+                    if isinstance(value, torch.Tensor):
+                        isend_tensor(value)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -841,8 +919,8 @@ class ModelRunner:
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
-        # Only perform sampling in the driver worker.
-        if not sampling_metadata.perform_sampling:
+        # Only perform sampling in the last pipeline stage of the driver worker.
+        if not sampling_metadata.perform_sampling or not is_pipeline_model_parallel_last_rank():
             return None
 
         # Sample the next token.
@@ -1037,7 +1115,7 @@ class ModelRunner:
                     input_positions[:batch_size],
                     kv_caches,
                     attn_metadata,
-                    memory_pool=self.graph_memory_pool,
+                    emory_pool=self.graph_memory_pool,
                 )
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
@@ -1089,6 +1167,7 @@ class CUDAGraphRunner:
                 positions,
                 kv_caches,
                 attn_metadata,
+                None,
                 **kwargs,
             )
         torch.cuda.synchronize()
@@ -1104,6 +1183,7 @@ class CUDAGraphRunner:
                     positions,
                     kv_caches,
                     attn_metadata,
+                    None,
                     **kwargs,
                 )
         torch.cuda.synchronize()
@@ -1126,6 +1206,7 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        hidden_states_metadata: Tuple[torch.Size, torch.dtype],
         **kwargs,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.

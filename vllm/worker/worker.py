@@ -10,8 +10,18 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, TensorizerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
+                              send_recv_tensor_dict,
                               ensure_model_parallel_initialized,
-                              init_distributed_environment)
+                              init_distributed_environment,
+                              get_tensor_model_parallel_group,
+                              get_tensor_model_parallel_src_rank,
+                              get_pipeline_model_parallel_group,
+                              get_pipeline_model_parallel_prev_rank,
+                              get_pipeline_model_parallel_next_rank,
+                              get_pipeline_model_parallel_rank,
+                              is_pipeline_model_parallel_first_rank,
+                              is_pipeline_model_parallel_last_rank,
+                              is_tensor_model_parallel_first_rank)
 from vllm.distributed.device_communicators import pynccl_utils
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
@@ -21,7 +31,6 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
-
 
 class Worker(WorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
@@ -176,20 +185,21 @@ class Worker(WorkerBase):
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
-        self.gpu_cache = self.cache_engine.gpu_cache
-        self.model_runner.set_block_size(self.cache_engine.block_size)
+        self.cache_engine = [CacheEngine(self.cache_config, self.model_config,
+                                        self.parallel_config) for _ in range(self.parallel_config.pipeline_parallel_size)]
+        self.gpu_cache = [self.cache_engine[ve].gpu_cache for ve in range(self.parallel_config.pipeline_parallel_size)]
+        self.model_runner.set_block_size(self.cache_engine[0].block_size)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model(self.gpu_cache)
+            self.model_runner.capture_model(self.gpu_cache[0])
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
     def cache_swap(
         self,
+        virtual_engine: int,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
@@ -197,48 +207,76 @@ class Worker(WorkerBase):
         # Issue cache operations.
         # TODO(woosuk): Profile swapping overhead and optimize if needed.
         if blocks_to_swap_in:
-            self.cache_engine.swap_in(blocks_to_swap_in)
+            self.cache_engine[virtual_engine].swap_in(blocks_to_swap_in)
         if blocks_to_swap_out:
-            self.cache_engine.swap_out(blocks_to_swap_out)
+            self.cache_engine[virtual_engine].swap_out(blocks_to_swap_out)
         if blocks_to_copy:
-            self.cache_engine.copy(blocks_to_copy)
+            self.cache_engine[virtual_engine].copy(blocks_to_copy)
 
     @torch.inference_mode()
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
+        virtual_engine: int = 0,
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
     ) -> Optional[SamplerOutput]:
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            num_seq_groups = len(seq_group_metadata_list)
-            assert blocks_to_swap_in is not None
-            assert blocks_to_swap_out is not None
-            assert blocks_to_copy is not None
-            data = {
-                "num_seq_groups": num_seq_groups,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            }
-            broadcast_tensor_dict(data, src=0)
+        rank = torch.distributed.get_rank()
+
+        if is_tensor_model_parallel_first_rank():
+            if is_pipeline_model_parallel_first_rank():
+                assert seq_group_metadata_list is not None
+                assert virtual_engine is not None
+                num_seq_groups = len(seq_group_metadata_list)
+                assert blocks_to_swap_in is not None
+                assert blocks_to_swap_out is not None
+                assert blocks_to_copy is not None
+                data = {
+                    "num_seq_groups": num_seq_groups,
+                    "virtual_engine": virtual_engine,
+                    "blocks_to_swap_in": blocks_to_swap_in,
+                    "blocks_to_swap_out": blocks_to_swap_out,
+                    "blocks_to_copy": blocks_to_copy,
+                }
+
+            if not is_pipeline_model_parallel_first_rank():
+                data = send_recv_tensor_dict(src=get_pipeline_model_parallel_prev_rank(),
+                                             dst=rank,
+                                             group=get_pipeline_model_parallel_group())
+                num_seq_groups = data["num_seq_groups"]
+                virtual_engine = data["virtual_engine"]
+                blocks_to_swap_in = data["blocks_to_swap_in"]
+                blocks_to_swap_out = data["blocks_to_swap_out"]
+                blocks_to_copy = data["blocks_to_copy"]
+               
+            if not is_pipeline_model_parallel_last_rank():
+                send_recv_tensor_dict(data,
+                                      src=rank,
+                                      dst=get_pipeline_model_parallel_next_rank(),
+                                      group=get_pipeline_model_parallel_group())
+
+        #torch.distributed.barrier(group=get_tensor_model_parallel_group())
+
+        if is_tensor_model_parallel_first_rank():
+            broadcast_tensor_dict(data, src=rank, group=get_tensor_model_parallel_group())
         else:
-            data = broadcast_tensor_dict(src=0)
+            data = broadcast_tensor_dict(src=get_tensor_model_parallel_src_rank(),
+                                         group=get_tensor_model_parallel_group())
             num_seq_groups = data["num_seq_groups"]
+            virtual_engine = data["virtual_engine"]
             blocks_to_swap_in = data["blocks_to_swap_in"]
             blocks_to_swap_out = data["blocks_to_swap_out"]
             blocks_to_copy = data["blocks_to_copy"]
 
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        self.cache_swap(virtual_engine, blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return {}
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
+                                                 self.gpu_cache[virtual_engine])
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

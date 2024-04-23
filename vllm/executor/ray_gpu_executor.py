@@ -65,7 +65,7 @@ class RayGPUExecutor(ExecutorBase):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        if self.parallel_config.tensor_parallel_size == 1:
+        if self.parallel_config.tensor_parallel_size == 1 and self.parallel_config.pipeline_parallel_size == 1:
             # For single GPU case, we use a ray worker with constrained memory.
             num_gpus = self.cache_config.gpu_memory_utilization
         else:
@@ -397,6 +397,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
@@ -405,11 +406,13 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
             "execute_model",
             driver_kwargs={
                 "seq_group_metadata_list": seq_group_metadata_list,
+                "virtual_engine": virtual_engine,
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
             })
 
         # Only the driver worker returns the sampling results.
-        output = all_outputs[0]
+        print(all_outputs)
+        output = [output for output in all_outputs if output is not None][0]
         return output

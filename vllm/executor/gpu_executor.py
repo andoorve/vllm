@@ -98,12 +98,14 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> SamplerOutput:
         output = await make_async(self.driver_worker.execute_model)(
             seq_group_metadata_list=seq_group_metadata_list,
+            virtual_engine=virtual_engine,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy)

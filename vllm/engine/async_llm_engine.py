@@ -4,6 +4,7 @@ import time
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
                     Set, Tuple, Type, Union)
+import collections
 
 from transformers import PreTrainedTokenizer
 
@@ -197,6 +198,19 @@ class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
 
     async def step_async(self) -> List[RequestOutput]:
+        while not self.pipeline_queue.full():
+            task = asyncio.get_event_loop().create_task(self._step_async(self.running_virtual_engine))
+            self.pipeline_queue.put(task)
+            self.running_virtual_engine = (self.running_virtual_engine + 1) % self.parallel_config.pipeline_parallel_size
+
+        running = self.pipeline_queue.get()
+        output, virtual_engine = await running
+
+        self.virtual_engine_locks[virtual_engine].release()
+
+        return output
+
+    async def _step_async(self, virtual_engine: int) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -206,18 +220,21 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        await self.virtual_engine_locks[virtual_engine].acquire()
+        seq_group_metadata_list, scheduler_outputs = self.scheduler[virtual_engine].schedule()
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
             output = await self.model_executor.execute_model_async(
-                seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
+                seq_group_metadata_list,
+                virtual_engine,
+                scheduler_outputs.blocks_to_swap_in,
                 scheduler_outputs.blocks_to_swap_out,
                 scheduler_outputs.blocks_to_copy)
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        return self._process_model_outputs(output, scheduler_outputs), virtual_engine
 
     async def encode_request_async(
         self,
@@ -411,7 +428,7 @@ class AsyncLLMEngine:
             # order of the arguments.
             cache_config = kwargs["cache_config"]
             parallel_config = kwargs["parallel_config"]
-            if parallel_config.tensor_parallel_size == 1:
+            if parallel_config.tensor_parallel_size == 1 and parallel_config.pipeline_parallel_size == 1:
                 num_gpus = cache_config.gpu_memory_utilization
             else:
                 num_gpus = 1
@@ -465,9 +482,11 @@ class AsyncLLMEngine:
             self.engine.abort_request(request_ids)
 
     async def run_engine_loop(self):
-        has_requests_in_progress = False
+        has_requests_in_progress = collections.deque(
+            [False] * self.engine.parallel_config.pipeline_parallel_size,
+            self.engine.parallel_config.pipeline_parallel_size)
         while True:
-            if not has_requests_in_progress:
+            if not any(has_requests_in_progress):
                 logger.debug("Waiting for new requests...")
                 await self._request_tracker.wait_for_new_requests()
                 logger.debug("Got new requests!")
@@ -475,8 +494,8 @@ class AsyncLLMEngine:
             # Abort if iteration takes too long due to unrecoverable errors
             # (eg. NCCL timeouts).
             try:
-                has_requests_in_progress = await asyncio.wait_for(
-                    self.engine_step(), ENGINE_ITERATION_TIMEOUT_S)
+                has_requests_in_progress.append(await asyncio.wait_for(
+                    self.engine_step(), ENGINE_ITERATION_TIMEOUT_S))
             except asyncio.TimeoutError as exc:
                 logger.error(
                     "Engine iteration timed out. This should never happen!")

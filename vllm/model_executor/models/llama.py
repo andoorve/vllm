@@ -321,11 +321,6 @@ class LlamaModel(nn.Module):
         if is_pipeline_model_parallel_last_rank():
             hidden_states, _ = self.norm(hidden_states, residual)
         else:
-            send_object_list([
-                hidden_states.shape, hidden_states.dtype, residual.shape,
-                residual.dtype
-            ], get_pipeline_model_parallel_next_rank(),
-                             get_pipeline_model_parallel_group())
             torch.distributed.send(hidden_states,
                                    get_pipeline_model_parallel_next_rank(),
                                    get_pipeline_model_parallel_group())

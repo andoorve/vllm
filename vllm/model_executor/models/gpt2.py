@@ -203,10 +203,9 @@ class GPT2Model(nn.Module):
             position_embeds = self.wpe(position_ids)
             hidden_states = inputs_embeds + position_embeds
         else:
-            hidden_states_metadata = [None] * 2
-            recv_object_list(hidden_states_metadata, get_pipeline_model_parallel_prev_rank(),
-                                   get_pipeline_model_parallel_group())
-            hidden_states = torch.empty(hidden_states_metadata[0], dtype=hidden_states_metadata[1], device="cuda")
+            hidden_states = torch.empty(list(input_ids.shape) + [self.embed_dim],
+                                        dtype=self.wte.weight.dtype,
+                                        device=self.wte.weight.device)
             torch.distributed.recv(hidden_states, get_pipeline_model_parallel_prev_rank(), get_pipeline_model_parallel_group())
 
         for i in range(len(self.h)):
@@ -216,9 +215,6 @@ class GPT2Model(nn.Module):
         if is_pipeline_model_parallel_last_rank():
             hidden_states = self.ln_f(hidden_states)
         else:
-            hidden_states_metadata = [hidden_states.size(), hidden_states.dtype]
-            send_object_list(hidden_states_metadata, get_pipeline_model_parallel_next_rank(),
-                                   get_pipeline_model_parallel_group())
             torch.distributed.send(hidden_states, get_pipeline_model_parallel_next_rank(), get_pipeline_model_parallel_group())
         return hidden_states
 

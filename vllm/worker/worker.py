@@ -10,18 +10,11 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, TensorizerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
-                              send_recv_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
+                              is_tensor_model_parallel_first_rank,
                               get_tensor_model_parallel_group,
-                              get_tensor_model_parallel_src_rank,
-                              get_pipeline_model_parallel_group,
-                              get_pipeline_model_parallel_prev_rank,
-                              get_pipeline_model_parallel_next_rank,
-                              get_pipeline_model_parallel_rank,
-                              is_pipeline_model_parallel_first_rank,
-                              is_pipeline_model_parallel_last_rank,
-                              is_tensor_model_parallel_first_rank)
+                              get_tensor_model_parallel_src_rank)
 from vllm.distributed.device_communicators import pynccl_utils
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
@@ -53,7 +46,6 @@ class Worker(WorkerBase):
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
         tensorizer_config: Optional[TensorizerConfig] = None,
-        is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -65,9 +57,6 @@ class Worker(WorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.tensorizer_config = tensorizer_config
-        self.is_driver_worker = is_driver_worker
-        if self.is_driver_worker:
-            assert self.rank == 0, "The driver worker must have rank 0."
 
         self.vision_language_config = vision_language_config
         if self.vision_language_config:
@@ -81,7 +70,6 @@ class Worker(WorkerBase):
             device_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
             tensorizer_config=tensorizer_config,
         )
@@ -222,44 +210,21 @@ class Worker(WorkerBase):
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
     ) -> Optional[SamplerOutput]:
-        rank = torch.distributed.get_rank()
-
         if is_tensor_model_parallel_first_rank():
-            if is_pipeline_model_parallel_first_rank():
-                assert seq_group_metadata_list is not None
-                assert virtual_engine is not None
-                num_seq_groups = len(seq_group_metadata_list)
-                assert blocks_to_swap_in is not None
-                assert blocks_to_swap_out is not None
-                assert blocks_to_copy is not None
-                data = {
-                    "num_seq_groups": num_seq_groups,
-                    "virtual_engine": virtual_engine,
-                    "blocks_to_swap_in": blocks_to_swap_in,
-                    "blocks_to_swap_out": blocks_to_swap_out,
-                    "blocks_to_copy": blocks_to_copy,
-                }
-
-            if not is_pipeline_model_parallel_first_rank():
-                data = send_recv_tensor_dict(src=get_pipeline_model_parallel_prev_rank(),
-                                             dst=rank,
-                                             group=get_pipeline_model_parallel_group())
-                num_seq_groups = data["num_seq_groups"]
-                virtual_engine = data["virtual_engine"]
-                blocks_to_swap_in = data["blocks_to_swap_in"]
-                blocks_to_swap_out = data["blocks_to_swap_out"]
-                blocks_to_copy = data["blocks_to_copy"]
-               
-            if not is_pipeline_model_parallel_last_rank():
-                send_recv_tensor_dict(data,
-                                      src=rank,
-                                      dst=get_pipeline_model_parallel_next_rank(),
-                                      group=get_pipeline_model_parallel_group())
-
-        #torch.distributed.barrier(group=get_tensor_model_parallel_group())
-
-        if is_tensor_model_parallel_first_rank():
-            broadcast_tensor_dict(data, src=rank, group=get_tensor_model_parallel_group())
+            assert seq_group_metadata_list is not None
+            assert virtual_engine is not None
+            num_seq_groups = len(seq_group_metadata_list)
+            assert blocks_to_swap_in is not None
+            assert blocks_to_swap_out is not None
+            assert blocks_to_copy is not None
+            data = {
+                "num_seq_groups": num_seq_groups,
+                "virtual_engine": virtual_engine,
+                "blocks_to_swap_in": blocks_to_swap_in,
+                "blocks_to_swap_out": blocks_to_swap_out,
+                "blocks_to_copy": blocks_to_copy,
+            }
+            broadcast_tensor_dict(data, src=get_tensor_model_parallel_src_rank(), group=get_tensor_model_parallel_group())
         else:
             data = broadcast_tensor_dict(src=get_tensor_model_parallel_src_rank(),
                                          group=get_tensor_model_parallel_group())

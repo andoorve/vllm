@@ -188,7 +188,6 @@ class RayGPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             tensorizer_config=self.tensorizer_config,
-            is_driver_worker=True,
         )
 
         self._run_workers("init_device")
@@ -388,8 +387,11 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         coros.append(driver_executor(*driver_args, **driver_kwargs))
 
         # Run the ray workers asynchronously.
-        for worker in self.workers:
-            coros.append(worker.execute_method.remote(method, *args, **kwargs))
+        for rank, worker in enumerate(self.workers, start=1):
+            if not rank % self.parallel_config.tensor_parallel_size == 0:
+                coros.append(worker.execute_method.remote(method, *args, **kwargs))
+            else:
+                coros.append(worker.execute_method.remote(method, *driver_args, **driver_kwargs))
 
         all_outputs = await asyncio.gather(*coros)
         return all_outputs
@@ -413,6 +415,5 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
             })
 
         # Only the driver worker returns the sampling results.
-        print(all_outputs)
         output = [output for output in all_outputs if output is not None][0]
         return output

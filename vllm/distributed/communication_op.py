@@ -6,7 +6,6 @@ from torch.distributed import ProcessGroup
 import torch.distributed
 
 from .parallel_state import (get_tensor_model_parallel_group,
-                             get_tensor_model_parallel_rank,
                              get_tensor_model_parallel_world_size,
                              is_pynccl_enabled_for_all_reduce)
 
@@ -88,7 +87,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
         # Convert negative dim to positive.
         dim += input_.dim()
     # Allocate output tensor.
-    if get_tensor_model_parallel_rank() == dst:
+    if torch.distributed.get_rank() == dst:
         gather_list = [torch.empty_like(input_) for _ in range(world_size)]
     else:
         gather_list = None
@@ -97,7 +96,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
                              gather_list,
                              dst=dst,
                              group=get_tensor_model_parallel_group())
-    if get_tensor_model_parallel_rank() == dst:
+    if torch.distributed.get_rank() == dst:
         output_tensor = torch.cat(gather_list, dim=dim)
     else:
         output_tensor = None
@@ -211,70 +210,6 @@ def broadcast_tensor_dict(
             async_handle.wait()
     return tensor_dict
 
-def send_recv_tensor_dict(
-    tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
-    src: int = 0,
-    dst: int = 1,
-    group: Optional[ProcessGroup] = None,
-) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
-    """Broadcast the input tensor dictionary."""
-    group = group or torch.distributed.group.WORLD
-    ranks = torch.distributed.get_process_group_ranks(group)
-    assert src in ranks, f"Invalid src rank ({src})"
-
-    rank = torch.distributed.get_rank()
-    if rank == src:
-        metadata_list: List[Tuple[Any, Any]] = []
-        assert isinstance(
-            tensor_dict,
-            dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
-        for key, value in tensor_dict.items():
-            if isinstance(value, torch.Tensor):
-                assert value.is_cuda, (
-                    f"Tensor {key}: {value} is not on cuda. Currently we only "
-                    f"support broadcasting tensors on cuda.")
-                metadata_list.append(
-                    (key, TensorMetadata(value.dtype, value.size())))
-            else:
-                metadata_list.append((key, value))
-        send_object_list([metadata_list],
-                          dst=dst,
-                          group=group)
-        async_handles = []
-        for key, value in metadata_list:
-            if isinstance(value, TensorMetadata):
-                tensor = tensor_dict[key]
-                async_handles.append(
-                    torch.distributed.isend(tensor,
-                                            dst=dst,
-                                            group=group))
-#        for async_handle in async_handles:
-#            async_handle.wait()
-    if rank == dst:
-        recv_metadata_list = [None]
-        recv_object_list(recv_metadata_list,
-                         src=src,
-                         group=group)
-        assert recv_metadata_list[0] is not None
-        tensor_dict = {}
-        async_handles = []
-        for key, value in recv_metadata_list[0]:
-            if isinstance(value, TensorMetadata):
-                tensor = torch.empty(value.size,
-                                     dtype=value.dtype,
-                                     device="cuda")
-                async_handle = torch.distributed.irecv(tensor,
-                                                       src=src,
-                                                       group=group)
-                async_handles.append(async_handle)
-                tensor_dict[key] = tensor
-            else:
-                tensor_dict[key] = value
-        for async_handle in async_handles:
-            async_handle.wait()
-    
-    return tensor_dict
-
 # REMOVE AFTER PYTORCH PR IS MERGED
 
 def send_object_list(object_list, dst, group=None, device=None):
@@ -295,7 +230,7 @@ def send_object_list(object_list, dst, group=None, device=None):
     object_sizes_tensor = torch.cat(size_list)
 
     # Send object sizes
-    torch.distributed.isend(object_sizes_tensor, dst=dst, group=group)
+    torch.distributed.send(object_sizes_tensor, dst=dst, group=group)
 
     # Concatenate and send serialized object tensors
     # Note: torch.cat will do an extra memory copy to the current device, if the tensor_list
@@ -305,7 +240,7 @@ def send_object_list(object_list, dst, group=None, device=None):
     else:
         object_tensor = torch.cat(tensor_list)
 
-    torch.distributed.isend(object_tensor, dst=dst, group=group)
+    torch.distributed.send(object_tensor, dst=dst, group=group)
 
 
 def recv_object_list(object_list, src=None, group=None, device=None):
@@ -319,8 +254,7 @@ def recv_object_list(object_list, src=None, group=None, device=None):
     object_sizes_tensor = torch.empty(len(object_list), dtype=torch.long, device=current_device)
 
     # Receive object sizes
-    req1 = torch.distributed.irecv(object_sizes_tensor, src=src, group=group)
-    req1.wait()
+    rank_sizes = torch.distributed.recv(object_sizes_tensor, src=src, group=group)
 
     # Tensor to receive serialized objects into.
     object_tensor = torch.empty(  # type: ignore[call-overload]
@@ -329,8 +263,8 @@ def recv_object_list(object_list, src=None, group=None, device=None):
         device=current_device
     )
 
-    req2 = torch.distributed.irecv(object_tensor, src=src, group=group)
-    req2.wait()
+    rank_objects = torch.distributed.recv(object_tensor, src=src, group=group)
+    assert rank_sizes == rank_objects, "Ranks do not match for object sizes and objects."
     # Deserialize objects using their stored sizes.
     offset = 0
     for i, obj_size in enumerate(object_sizes_tensor):
@@ -338,3 +272,4 @@ def recv_object_list(object_list, src=None, group=None, device=None):
         obj_view = obj_view.type(torch.uint8)
         offset += obj_size
         object_list[i] = torch.distributed.distributed_c10d._tensor_to_object(obj_view, obj_size)
+    return rank_sizes

@@ -490,6 +490,7 @@ class AsyncLLMEngine:
                 logger.debug("Waiting for new requests...")
                 await self._request_tracker.wait_for_new_requests()
                 logger.debug("Got new requests!")
+                has_requests_in_progress.append(True)
 
             # Abort if iteration takes too long due to unrecoverable errors
             # (eg. NCCL timeouts).

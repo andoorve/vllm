@@ -2,6 +2,7 @@ import asyncio
 import copy
 import os
 import pickle
+import functools
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
@@ -415,5 +416,5 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
             })
 
         # Only the driver worker returns the sampling results.
-        output = [output for output in all_outputs if output is not None][0]
+        output = functools.reduce(lambda x, y: x or y, all_outputs) 
         return output

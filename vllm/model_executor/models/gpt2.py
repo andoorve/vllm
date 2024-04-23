@@ -32,8 +32,7 @@ from vllm.distributed import (get_tensor_model_parallel_world_size,
                               get_pipeline_model_parallel_rank,
                               get_pipeline_model_parallel_prev_rank,
                               get_pipeline_model_parallel_next_rank,
-                              get_pipeline_model_parallel_group,
-                              send_object_list, recv_object_list)
+                              get_pipeline_model_parallel_group)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,

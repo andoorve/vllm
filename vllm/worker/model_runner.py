@@ -14,10 +14,10 @@ from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, TensorizerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
-                              get_tensor_model_parallel_src_rank,
-                              with_pynccl_for_all_reduce,
                               get_tensor_model_parallel_group,
-                              is_pipeline_model_parallel_last_rank)
+                              get_tensor_model_parallel_src_rank,
+                              is_pipeline_model_parallel_last_rank,
+                              with_pynccl_for_all_reduce)
 from vllm.distributed.device_communicators import (custom_all_reduce,
                                                    pynccl_utils)
 from vllm.logger import init_logger
@@ -854,8 +854,8 @@ class ModelRunner:
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         # Only perform sampling in the last pipeline stage of the driver worker.
-        if not sampling_metadata.perform_sampling or not is_pipeline_model_parallel_last_rank(
-        ):
+        if (not sampling_metadata.perform_sampling
+                or not is_pipeline_model_parallel_last_rank()):
             return None
 
         # Sample the next token.

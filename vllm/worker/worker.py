@@ -11,10 +11,10 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
-                              init_distributed_environment,
-                              is_tensor_model_parallel_first_rank,
                               get_tensor_model_parallel_group,
-                              get_tensor_model_parallel_src_rank)
+                              get_tensor_model_parallel_src_rank,
+                              init_distributed_environment,
+                              is_tensor_model_parallel_first_rank)
 from vllm.distributed.device_communicators import pynccl_utils
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)

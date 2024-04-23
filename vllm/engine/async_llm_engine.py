@@ -1,10 +1,10 @@
 import asyncio
+import collections
 import os
 import time
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
                     Set, Tuple, Type, Union)
-import collections
 
 from transformers import PreTrainedTokenizer
 
@@ -432,7 +432,8 @@ class AsyncLLMEngine:
             # order of the arguments.
             cache_config = kwargs["cache_config"]
             parallel_config = kwargs["parallel_config"]
-            if parallel_config.tensor_parallel_size == 1 and parallel_config.pipeline_parallel_size == 1:
+            if (parallel_config.tensor_parallel_size == 1
+                    and parallel_config.pipeline_parallel_size == 1):
                 num_gpus = cache_config.gpu_memory_utilization
             else:
                 num_gpus = 1

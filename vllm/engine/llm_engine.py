@@ -1,6 +1,6 @@
+import asyncio
 import time
 from queue import Queue
-import asyncio
 from typing import Iterable, List, Optional, Tuple, Type, Union
 
 from transformers import PreTrainedTokenizer

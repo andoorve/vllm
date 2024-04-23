@@ -17,22 +17,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-2 model compatible with HuggingFace weights."""
-from typing import List, Optional
 import re
+from typing import List, Optional
 
 import torch
 from torch import nn
 from transformers import GPT2Config
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              get_pipeline_model_parallel_world_size,
-                              is_pipeline_model_parallel_first_rank,
-                              is_pipeline_model_parallel_last_rank,
-                              get_pipeline_model_parallel_rank,
-                              get_pipeline_model_parallel_prev_rank,
+from vllm.distributed import (get_pipeline_model_parallel_group,
                               get_pipeline_model_parallel_next_rank,
-                              get_pipeline_model_parallel_group)
+                              get_pipeline_model_parallel_prev_rank,
+                              get_pipeline_model_parallel_rank,
+                              get_pipeline_model_parallel_world_size,
+                              get_tensor_model_parallel_world_size,
+                              is_pipeline_model_parallel_first_rank,
+                              is_pipeline_model_parallel_last_rank)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
@@ -180,8 +180,8 @@ class GPT2Model(nn.Module):
         assert not config.add_cross_attention
         assert not config.scale_attn_by_inverse_layer_idx
         assert not config.reorder_and_upcast_attn
-        assert config.num_hidden_layers % get_pipeline_model_parallel_world_size(
-        ) == 0
+        assert (config.num_hidden_layers %
+                get_pipeline_model_parallel_world_size() == 0)
         self.embed_dim = config.hidden_size
         self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)

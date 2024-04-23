@@ -21,22 +21,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, List, Optional, Tuple
 import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank,
-    get_pipeline_model_parallel_world_size,
-    is_pipeline_model_parallel_first_rank,
-    is_pipeline_model_parallel_last_rank, get_pipeline_model_parallel_rank,
-    get_pipeline_model_parallel_prev_rank,
-    get_pipeline_model_parallel_next_rank, get_pipeline_model_parallel_group)
 from vllm.config import LoRAConfig
+from vllm.distributed import (get_pipeline_model_parallel_group,
+                              get_pipeline_model_parallel_next_rank,
+                              get_pipeline_model_parallel_prev_rank,
+                              get_pipeline_model_parallel_rank,
+                              get_pipeline_model_parallel_world_size,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              is_pipeline_model_parallel_first_rank,
+                              is_pipeline_model_parallel_last_rank)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
@@ -267,8 +269,8 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        assert config.num_hidden_layers % get_pipeline_model_parallel_world_size(
-        ) == 0
+        assert (config.num_hidden_layers %
+                get_pipeline_model_parallel_world_size() == 0)
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config, linear_method)
             for _ in range(config.num_hidden_layers //

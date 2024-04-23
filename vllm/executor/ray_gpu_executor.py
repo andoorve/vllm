@@ -1,8 +1,8 @@
 import asyncio
 import copy
+import functools
 import os
 import pickle
-import functools
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
@@ -66,7 +66,8 @@ class RayGPUExecutor(ExecutorBase):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        if self.parallel_config.tensor_parallel_size == 1 and self.parallel_config.pipeline_parallel_size == 1:
+        if (self.parallel_config.tensor_parallel_size == 1
+                and self.parallel_config.pipeline_parallel_size == 1):
             # For single GPU case, we use a ray worker with constrained memory.
             num_gpus = self.cache_config.gpu_memory_utilization
         else:

@@ -4,7 +4,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from vllm.distributed import tensor_model_parallel_gather, get_tensor_model_parallel_src_rank
+from vllm.distributed import (get_tensor_model_parallel_src_rank,
+                              tensor_model_parallel_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 

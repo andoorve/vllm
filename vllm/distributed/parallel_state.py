@@ -279,7 +279,8 @@ def is_pipeline_model_parallel_last_rank() -> bool:
 
 
 def is_tensor_model_parallel_first_rank() -> bool:
-    """Return True if the caller is the first rank in the tensor parallel group"""
+    """Return True if the caller is the first rank in the tensor
+    parallel group"""
     return get_tensor_model_parallel_rank() == 0
 
 

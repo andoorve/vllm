@@ -305,9 +305,6 @@ class Scheduler:
         logger.debug(f"add_seq_group {seq_group.request_id}")
         self.waiting.append(seq_group)
 
-    def get_cost(self) -> int:
-        return len(self.waiting) + len(self.running) + len(self.swapped)
-
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a sequence group with the given ID.
 

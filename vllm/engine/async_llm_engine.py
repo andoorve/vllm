@@ -1,5 +1,4 @@
 import asyncio
-import collections
 import os
 import time
 from functools import partial
@@ -197,33 +196,7 @@ class RequestTracker:
 class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
 
-    async def step_async(self) -> List[RequestOutput]:
-        while not self.pipeline_queue.full():
-            task = asyncio.get_event_loop().create_task(
-                self._step_async(self.running_virtual_engine))
-            self.pipeline_queue.put(task)
-            self.running_virtual_engine = (
-                self.running_virtual_engine +
-                1) % self.parallel_config.pipeline_parallel_size
-
-        running = self.pipeline_queue.get()
-        output, virtual_engine = await running
-
-        self.virtual_engine_locks[virtual_engine].release()
-
-        return output
-
-    async def _step_async(self, virtual_engine: int) -> List[RequestOutput]:
-        """Performs one decoding iteration and returns newly generated results.
-        The workers are ran asynchronously if possible.
-
-        This function performs one decoding iteration of the engine. It first
-        schedules the sequences to be executed in the next iteration and the
-        token blocks to be swapped in/out/copy. Then, it executes the model
-        and updates the scheduler with the model outputs. Finally, it decodes
-        the sequences and returns the newly generated results.
-        """
-        await self.virtual_engine_locks[virtual_engine].acquire()
+    async def step_async(self, virtual_engine: int) -> List[RequestOutput]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             virtual_engine].schedule()
 
@@ -237,8 +210,7 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             output = []
 
-        return self._process_model_outputs(output,
-                                           scheduler_outputs), virtual_engine
+        return self._process_model_outputs(output, scheduler_outputs)
 
     async def encode_request_async(
         self,
@@ -441,7 +413,7 @@ class AsyncLLMEngine:
                 self._engine_class).remote
         return engine_class(*args, **kwargs)
 
-    async def engine_step(self) -> bool:
+    async def engine_step(self, virtual_engine: int) -> bool:
         """Kick the engine to process the waiting requests.
 
         Returns True if there are in-progress requests."""
@@ -471,7 +443,7 @@ class AsyncLLMEngine:
         if self.engine_use_ray:
             request_outputs = await self.engine.step.remote()
         else:
-            request_outputs = await self.engine.step_async()
+            request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
         for request_output in request_outputs:
@@ -487,21 +459,41 @@ class AsyncLLMEngine:
             self.engine.abort_request(request_ids)
 
     async def run_engine_loop(self):
-        has_requests_in_progress = collections.deque(
-            [False] * self.engine.parallel_config.pipeline_parallel_size,
-            self.engine.parallel_config.pipeline_parallel_size)
+        has_requests_in_progress = [
+            False
+        ] * self.engine.parallel_config.pipeline_parallel_size
         while True:
             if not any(has_requests_in_progress):
                 logger.debug("Waiting for new requests...")
                 await self._request_tracker.wait_for_new_requests()
                 logger.debug("Got new requests!")
-                has_requests_in_progress.append(True)
+                requests_in_progress = [
+                    asyncio.create_task(
+                        asyncio.wait_for(self.engine_step(ve),
+                                         ENGINE_ITERATION_TIMEOUT_S)) for ve in
+                    range(self.engine.parallel_config.pipeline_parallel_size)
+                ]
+                has_requests_in_progress = [
+                    True
+                ] * self.engine.parallel_config.pipeline_parallel_size
 
             # Abort if iteration takes too long due to unrecoverable errors
             # (eg. NCCL timeouts).
             try:
-                has_requests_in_progress.append(await asyncio.wait_for(
-                    self.engine_step(), ENGINE_ITERATION_TIMEOUT_S))
+                done, _ = await asyncio.wait(
+                    requests_in_progress, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    result = task.result()
+                    virtual_engine = requests_in_progress.index(task)
+                    if result or self.engine.has_unfinished_requests():
+                        requests_in_progress[
+                            virtual_engine] = asyncio.create_task(
+                                asyncio.wait_for(
+                                    self.engine_step(virtual_engine),
+                                    ENGINE_ITERATION_TIMEOUT_S))
+                        has_requests_in_progress[virtual_engine] = True
+                    else:
+                        has_requests_in_progress[virtual_engine] = False
             except asyncio.TimeoutError as exc:
                 logger.error(
                     "Engine iteration timed out. This should never happen!")

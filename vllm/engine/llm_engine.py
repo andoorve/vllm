@@ -1,6 +1,4 @@
-import asyncio
 import time
-from queue import Queue
 from typing import Iterable, List, Optional, Tuple, Type, Union
 
 from transformers import PreTrainedTokenizer
@@ -186,13 +184,6 @@ class LLMEngine:
         self.scheduler = [
             Scheduler(scheduler_config, cache_config, parallel_config,
                       lora_config)
-            for _ in range(parallel_config.pipeline_parallel_size)
-        ]
-        self.running_virtual_engine = 0
-        self.pipeline_queue = Queue(
-            maxsize=parallel_config.pipeline_parallel_size)
-        self.virtual_engine_locks = [
-            asyncio.Lock()
             for _ in range(parallel_config.pipeline_parallel_size)
         ]
 
@@ -398,7 +389,10 @@ class LLMEngine:
                                   arrival_time, lora_request, multi_modal_data)
 
         # Add the sequence group to the scheduler.
-        costs = [scheduler.get_cost() for scheduler in self.scheduler]
+        costs = [
+            scheduler.get_num_unfinished_seq_groups()
+            for scheduler in self.scheduler
+        ]
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
         min_cost_scheduler.add_seq_group(seq_group)
 

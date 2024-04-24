@@ -150,6 +150,12 @@ class Worker(WorkerBase):
                              cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+        if self.parallel_config.world_size > 1:
+            num_blocks_tensor = torch.tensor([num_gpu_blocks, num_cpu_blocks], dtype=torch.int32,
+                         device=self.device)
+            torch.distributed.all_reduce(num_blocks_tensor, torch.distributed.ReduceOp.MIN)
+            num_gpu_blocks = int(num_blocks_tensor[0])
+            num_cpu_blocks = int(num_blocks_tensor[1])
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
         gc.collect()

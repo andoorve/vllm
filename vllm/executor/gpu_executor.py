@@ -41,7 +41,6 @@ class GPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             tensorizer_config=self.tensorizer_config,
-            is_driver_worker=True,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()

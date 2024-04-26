@@ -297,18 +297,14 @@ class LlamaModel(nn.Module):
             residual = None
         else:
             sizes = list(input_ids.shape) + [self.config.hidden_size]
-            hidden_states = torch.empty(sizes,
-                                        dtype=self.embed_tokens.weight.dtype,
-                                        device=self.embed_tokens.weight.device)
-            residual = torch.empty(sizes,
+            combined = torch.empty([2 * sizes[0]] + list(sizes)[1:],
                                    dtype=self.embed_tokens.weight.dtype,
                                    device=self.embed_tokens.weight.device)
-            torch.distributed.recv(hidden_states,
+            torch.distributed.recv(combined,
                                    get_pipeline_model_parallel_prev_rank(),
-                                   get_pipeline_model_parallel_group())
-            torch.distributed.recv(residual,
-                                   get_pipeline_model_parallel_prev_rank(),
-                                   get_pipeline_model_parallel_group())
+                                   get_pipeline_model_parallel_group(),
+                                   tag=0)
+            hidden_states, residual = torch.chunk(combined, 2, dim=0)
 
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -323,12 +319,13 @@ class LlamaModel(nn.Module):
         if is_pipeline_model_parallel_last_rank():
             hidden_states, _ = self.norm(hidden_states, residual)
         else:
-            torch.distributed.send(hidden_states,
+            # Combine hidden_states and residual for sending to
+            # avoid nasty concurrency issues
+            combined = torch.cat([hidden_states, residual], dim=0)
+            torch.distributed.send(combined,
                                    get_pipeline_model_parallel_next_rank(),
-                                   get_pipeline_model_parallel_group())
-            torch.distributed.send(residual,
-                                   get_pipeline_model_parallel_next_rank(),
-                                   get_pipeline_model_parallel_group())
+                                   get_pipeline_model_parallel_group(),
+                                   tag=1)
         return hidden_states
 
 

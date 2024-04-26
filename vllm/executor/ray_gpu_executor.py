@@ -384,19 +384,22 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         if driver_kwargs is None:
             driver_kwargs = kwargs
 
-        # Run the driver worker asynchronously.
-        driver_executor = make_async(getattr(self.driver_worker, method))
-        coros.append(driver_executor(*driver_args, **driver_kwargs))
+        # Lock may be provably unnecessary. Nevertheless, should be limited 
+        # performance impact.
+        async with self.lock:
+            # Run the driver worker asynchronously.
+            driver_executor = make_async(getattr(self.driver_worker, method))
+            coros.append(driver_executor(*driver_args, **driver_kwargs))
 
-        # Run the ray workers asynchronously.
-        for rank, worker in enumerate(self.workers, start=1):
-            if rank % self.parallel_config.tensor_parallel_size != 0:
-                coros.append(
-                    worker.execute_method.remote(method, *args, **kwargs))
-            else:
-                coros.append(
-                    worker.execute_method.remote(method, *driver_args,
-                                                 **driver_kwargs))
+            # Run the ray workers asynchronously.
+            for rank, worker in enumerate(self.workers, start=1):
+                if rank % self.parallel_config.tensor_parallel_size != 0:
+                    coros.append(
+                        worker.execute_method.remote(method, *args, **kwargs))
+                else:
+                    coros.append(
+                        worker.execute_method.remote(method, *driver_args,
+                                                     **driver_kwargs))
 
         all_outputs = await asyncio.gather(*coros)
         return all_outputs

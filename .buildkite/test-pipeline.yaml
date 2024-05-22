@@ -60,7 +60,7 @@ steps:
   num_gpus: 4
   commands:
   - pytest -v -s distributed/test_pipeline_parallel.py
-  - EAGER_MODE=1 CHUNKED_PREFILL=1 pytest -v -s distributed/test_pipeline_parallelism.py
+  - EAGER_MODE=1 CHUNKED_PREFILL=1 pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: Engine Test
   mirror_hardwares: [amd]

@@ -468,13 +468,12 @@ class LlamaForCausalLM(nn.Module):
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-        pp_rank = get_pipeline_model_parallel_rank()
-        pp_size = get_pipeline_model_parallel_world_size()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path, pp_rank, pp_size, tp_rank, tp_size,
+                quantization_param_path, tp_rank, tp_size,
                 self.config.num_hidden_layers,
                 self.config.__class__.model_type):
-            layer_self_attn = self.model.layers[layer_idx].self_attn
+            if not isinstance(self.model.layers[layer_idx], nn.Identity):
+                layer_self_attn = self.model.layers[layer_idx].self_attn
 
             if is_hip():
                 # The scaling factor convention we are assuming is

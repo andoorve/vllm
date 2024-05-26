@@ -294,8 +294,7 @@ def pt_weights_iterator(
 
 
 def kv_cache_scales_loader(
-        filename: str, pp_rank: int, pp_size: int, tp_rank: int, tp_size: int,
-        num_hidden_layers: int,
+        filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
         model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
     """
     A simple utility to read in KV cache scaling factors that have been
@@ -310,8 +309,6 @@ def kv_cache_scales_loader(
             context = {
                 "model_type": model_type,
                 "num_hidden_layers": num_hidden_layers,
-                "pp_rank": pp_rank,
-                "pp_size": pp_size,
                 "tp_rank": tp_rank,
                 "tp_size": tp_size,
             }
@@ -319,12 +316,7 @@ def kv_cache_scales_loader(
             schema = QuantParamSchema.model_validate(schema_dct,
                                                      context=context)
             layer_scales_map = schema.kv_cache.scaling_factor[tp_rank]
-            pp_adjusted_layer_scales_map = {
-                k - (pp_rank * (num_hidden_layers // pp_size)): v
-                for k, v in layer_scales_map.items()
-                if k // (num_hidden_layers // pp_size) == pp_rank
-            }
-            return pp_adjusted_layer_scales_map.items()
+            return layer_scales_map.items()
 
     except FileNotFoundError:
         logger.error("File or directory '%s' not found.", filename)

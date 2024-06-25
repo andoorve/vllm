@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.distributed
@@ -32,32 +32,28 @@ def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
     return get_tp_group().broadcast_tensor_dict(tensor_dict, src)
 
 
-def send_next_rank(tensors: List[torch.Tensor]) -> None:
+def send_tensor_dict(tensors: Dict[str, torch.Tensor],
+                     dst: Optional[int] = None) -> None:
     """
     Send the tensors to the next pipeline model parallel rank.
     Args:
-        tensors (List[torch.Tensor]): List of tensors to send.
+        tensors (Dict[torch.Tensor]): Dict of tensors to send.
     """
-    next_rank = get_pp_group().next_rank
-    for tensor in tensors:
-        get_pp_group().send(tensor, dst=next_rank)
+    if dst is None:
+        dst = get_pp_group().next_rank
+    get_pp_group().send_tensor_dict(tensors, dst)
 
 
-def recv_prev_rank(num_tensors: int, size: torch.Size,
-                   dtype: torch.dtype) -> List[torch.Tensor]:
+def recv_tensor_dict(
+    src: Optional[int] = None
+) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
     """
     Receive tensors from the previous pipeline model parallel rank assuming all
     tensors are the same size.
-    Args:
-        num_tensors (int): Number of tensors to receive.
-        size (torch.Size): Size of the tensors.
-        dtype (torch.dtype): Data type of the tensors.
     Returns:
-        List[torch.Tensor]: List of received tensors.
+        Dict[torch.Tensor]: Dict of received tensors.
     """
-    prev_rank = get_pp_group().prev_rank
-    tensors = []
-    for _ in range(num_tensors):
-        tensor = get_pp_group().recv(size, dtype, src=prev_rank)
-        tensors.append(tensor)
+    if src is None:
+        src = get_pp_group().prev_rank
+    tensors = get_pp_group().recv_tensor_dict(src)
     return tensors

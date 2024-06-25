@@ -9,14 +9,19 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
+                              is_pipeline_model_parallel_first_rank,
+                              is_pipeline_model_parallel_last_rank,
                               set_custom_all_reduce)
+from vllm.distributed.communication_op import (broadcast_tensor_dict,
+                                               recv_tensor_dict,
+                                               send_tensor_dict)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           PoolerOutput, SamplerOutput)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import ModelRunner
@@ -293,9 +298,17 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return []
 
+        intermediate_tensors = None
+        if not is_pipeline_model_parallel_first_rank():
+            intermediate_tensors = IntermediateTensors(recv_tensor_dict())
+
         output = self.model_runner.execute_model(
             seq_group_metadata_list, self.gpu_cache[virtual_engine],
-            virtual_engine)
+            virtual_engine, intermediate_tensors)
+
+        if not is_pipeline_model_parallel_last_rank():
+            send_tensor_dict(output.tensors)
+            return [None]
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
@@ -333,8 +346,17 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return False
 
-        self.model_runner.execute_model(None, self.gpu_cache[virtual_engine],
-                                        virtual_engine)
+        intermediate_tensors = None
+        if not is_pipeline_model_parallel_first_rank():
+            intermediate_tensors = IntermediateTensors(recv_tensor_dict())
+
+        output = self.model_runner.execute_model(
+            None, self.gpu_cache[virtual_engine], virtual_engine,
+            intermediate_tensors)
+
+        if not is_pipeline_model_parallel_last_rank():
+            send_tensor_dict(output.tensors)
+
         return True
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

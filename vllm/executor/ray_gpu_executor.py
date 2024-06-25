@@ -331,15 +331,26 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        async with self.pp_locks[0]:
-            output = await self.driver_exec_method("execute_model",
-                                                   execute_model_req)
+
+        async def _run_task_with_lock(task, lock, *args, **kwargs):
+            async with lock:
+                return await task(*args, **kwargs)
+
+        tasks = []
+        tasks.append(
+            asyncio.create_task(
+                _run_task_with_lock(self.driver_exec_method, self.pp_locks[0],
+                                    "execute_model", execute_model_req)))
         for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
                                                 start=1):
-            async with self.pp_locks[pp_rank]:
-                output = await driver_worker.execute_method.remote(
-                    "execute_model", execute_model_req)
-        return output
+            tasks.append(
+                asyncio.create_task(
+                    _run_task_with_lock(driver_worker.execute_method.remote,
+                                        self.pp_locks[pp_rank],
+                                        "execute_model", execute_model_req)))
+
+        results = await asyncio.gather(*tasks)
+        return results[-1]
 
     async def _start_worker_execution_loop(self):
         coros = [

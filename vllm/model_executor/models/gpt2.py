@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-2 model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -25,7 +25,6 @@ from transformers import GPT2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed.communication_op import recv_prev_rank, send_next_rank
 from vllm.distributed.parallel_state import (
     get_pipeline_model_parallel_rank, get_pipeline_model_parallel_world_size,
     get_tensor_model_parallel_world_size,
@@ -44,7 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
 class GPT2Attention(nn.Module):
@@ -206,14 +205,15 @@ class GPT2Model(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
+        intermediate_tensors: Optional[IntermediateTensors],
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         if is_pipeline_model_parallel_first_rank():
             inputs_embeds = self.wte(input_ids)
             position_embeds = self.wpe(position_ids)
             hidden_states = inputs_embeds + position_embeds
         else:
-            sizes = list(input_ids.shape) + [self.embed_dim]
-            hidden_states, = recv_prev_rank(1, sizes, self.wte.weight.dtype)
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
@@ -223,10 +223,9 @@ class GPT2Model(nn.Module):
 
         if is_pipeline_model_parallel_last_rank():
             hidden_states = self.ln_f(hidden_states)
+            return hidden_states
         else:
-            send_next_rank([hidden_states])
-
-        return hidden_states
+            return IntermediateTensors({"hidden_states": hidden_states})
 
 
 class GPT2LMHeadModel(nn.Module):
@@ -251,9 +250,10 @@ class GPT2LMHeadModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata)
+                                         attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -269,6 +269,16 @@ class GPT2LMHeadModel(nn.Module):
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
+
+    def make_empty_intermediate_tensors(
+            self, batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            "hidden_states":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+        })
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))

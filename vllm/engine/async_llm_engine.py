@@ -578,7 +578,7 @@ class AsyncLLMEngine:
             # Abort if iteration takes too long due to unrecoverable errors
             # (eg. NCCL timeouts).
             try:
-                with asyncio_timeout(ENGINE_ITERATION_TIMEOUT_S):
+                async with asyncio_timeout(ENGINE_ITERATION_TIMEOUT_S):
                     done, _ = await asyncio.wait(
                         requests_in_progress,
                         return_when=asyncio.FIRST_COMPLETED)

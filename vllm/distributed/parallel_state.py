@@ -660,13 +660,13 @@ class GroupCoordinator:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
-            dst = self.next_rank
+            dst = (self.rank_in_group + 1) % self.world_size
 
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
             pynccl_comm.send(tensor, dst)
         else:
-            torch.distributed.send(tensor, dst, self.device_group)
+            torch.distributed.send(tensor, self.ranks[dst], self.device_group)
 
     def recv(self,
              size: torch.Size,
@@ -675,14 +675,14 @@ class GroupCoordinator:
         """Receives a tensor from the src rank."""
         """NOTE: `src` is the local rank of the destination rank."""
         if src is None:
-            src = self.prev_rank
+            src = (self.rank_in_group - 1) % self.world_size
 
         tensor = torch.empty(size, dtype=dtype, device=self.device)
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
             pynccl_comm.recv(tensor, src)
         else:
-            torch.distributed.recv(tensor, src, self.device_group)
+            torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
     def destroy(self):

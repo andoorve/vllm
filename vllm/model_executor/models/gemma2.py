@@ -37,7 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput, IntermediateTensors
+from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA

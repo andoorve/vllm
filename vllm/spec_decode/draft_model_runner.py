@@ -74,9 +74,8 @@ class TP1DraftModelRunner(ModelRunner):
             List[SequenceGroupMetadata]] = None
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> ModelInputForGPUWithSamplingMetadata:
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            virtual_engine: int) -> ModelInputForGPUWithSamplingMetadata:
         """A temporary solution that caches the seq_group_metadata_list
         for multi-step execution.
         TODO: In-place update model_input and remove this function.
@@ -108,7 +107,7 @@ class TP1DraftModelRunner(ModelRunner):
                 seq.append_token_id(token_id, token_logprob.logprob)
                 seq.update_num_computed_tokens(1)
 
-        return self.prepare_model_input(self.cached_seq_group_metadata_list)
+        return self.prepare_model_input(self.cached_seq_group_metadata_list, 0)
 
     @torch.inference_mode()
     def execute_model(

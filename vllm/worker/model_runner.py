@@ -903,6 +903,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         use_cuda_graph=True,
                     )
 
+                    if self.lora_config:
+                        lora_mapping = LoRAMapping(
+                            [0] * batch_size,
+                            [0] * batch_size,
+                        )
+                        self.set_active_loras(set(), lora_mapping)
+
                     graph_runner = CUDAGraphRunner(self.model)
                     hidden_or_intermediate_states[
                         virtual_engine] = graph_runner.capture(
@@ -921,8 +928,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             stream=graph_capture_context.stream,
                         )
                     self.graph_memory_pool = graph_runner.graph.pool()
-                    self.graph_runners[virtual_engine][
-                        batch_size] = graph_runner
+                    self.graph_runners[virtual_engine][batch_size] = (
+                        graph_runner)
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time

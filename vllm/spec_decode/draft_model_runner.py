@@ -6,7 +6,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.logger import init_logger
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 
@@ -114,6 +115,7 @@ class TP1DraftModelRunner(ModelRunner):
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         # Since we do not broadcast data inside execute_model anymore,

@@ -597,9 +597,9 @@ class AsyncLLMEngine:
                             has_unfinished_requests_for_virtual_engine(
                                 virtual_engine))
                     if result or has_unfinished_requests:
-                        requests_in_progress[
-                            virtual_engine] = asyncio.create_task(
-                                self.engine_step(virtual_engine))
+                        requests_in_progress[virtual_engine] = (
+                            asyncio.create_task(
+                                self.engine_step(virtual_engine)))
                         has_requests_in_progress[virtual_engine] = True
                     else:
                         has_requests_in_progress[virtual_engine] = False

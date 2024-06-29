@@ -582,7 +582,7 @@ class AsyncLLMEngine:
                     done, _ = await asyncio.wait(
                         requests_in_progress,
                         return_when=asyncio.FIRST_COMPLETED)
-                    for _ in pipeline_parallel_size:
+                    for _ in range(pipeline_parallel_size):
                         await asyncio.sleep(0)
                 for task in done:
                     result = task.result()

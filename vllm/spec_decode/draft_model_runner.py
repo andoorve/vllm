@@ -131,6 +131,7 @@ class TP1DraftModelRunner(ModelRunner):
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
 
+        virtual_engine = model_input.virtual_engine
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
             # Currently cuda graph is only supported by the decode phase.
@@ -140,7 +141,8 @@ class TP1DraftModelRunner(ModelRunner):
             if prefill_meta is None and decode_meta.use_cuda_graph:
                 assert model_input.input_tokens is not None
                 graph_batch_size = model_input.input_tokens.shape[0]
-                model_executable = self.graph_runners[graph_batch_size]
+                model_executable = (
+                    self.graph_runners[virtual_engine][graph_batch_size])
             else:
                 model_executable = self.model
 
@@ -150,6 +152,7 @@ class TP1DraftModelRunner(ModelRunner):
                 positions=model_input.input_positions,
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
+                intermediate_tensors=intermediate_tensors,
                 **multi_modal_kwargs,
             )
 
